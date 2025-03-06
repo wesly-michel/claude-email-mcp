@@ -1,0 +1,27 @@
+{
+  "name": "claude-email-mcp",
+  "version": "1.0.0",
+  "description": "Message Control Protocol for Claude to send and read emails",
+  "author": {
+    "name": "Wesly Michel"
+  },
+  "main": "index.js",
+  "scripts": {
+    "deploy": "serverless deploy",
+    "deploy:prod": "serverless deploy --stage prod",
+    "offline": "serverless offline",
+    "test": "jest"
+  },
+  "dependencies": {
+    "aws-sdk": "^2.1443.0",
+    "axios": "^1.4.0",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "dotenv": "^16.3.1",
+    "jest": "^29.6.4",
+    "serverless": "^3.34.0",
+    "serverless-dotenv-plugin": "^6.0.0",
+    "serverless-offline": "^12.0.4"
+  }
+}

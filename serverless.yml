@@ -1,0 +1,198 @@
+service: claude-email-mcp
+
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'us-east-1'}
+  memorySize: 256
+  timeout: 30
+  environment:
+    STAGE: ${self:provider.stage}
+    SES_REGION: ${self:provider.region}
+    SECRETS_NAME: claude-mcp-secrets-${self:provider.stage}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - ses:SendEmail
+            - ses:SendRawEmail
+          Resource: "*"
+        - Effect: Allow
+          Action:
+            - secretsmanager:GetSecretValue
+          Resource: 
+            - Fn::Join:
+              - ':'
+              - - 'arn:aws:secretsmanager'
+                - Ref: 'AWS::Region'
+                - Ref: 'AWS::AccountId'
+                - 'secret'
+                - 'claude-mcp-secrets-${self:provider.stage}'
+        - Effect: Allow
+          Action:
+            - dynamodb:PutItem
+            - dynamodb:GetItem
+            - dynamodb:UpdateItem
+            - dynamodb:Query
+            - dynamodb:Scan
+          Resource:
+            - Fn::GetAtt: [EmailsTable, Arn]
+
+functions:
+  sendEmail:
+    handler: src/handlers/sendEmail.handler
+    events:
+      - http:
+          path: /email
+          method: post
+          cors: true
+          authorizer:
+            type: CUSTOM
+            authorizerId:
+              Ref: ApiGatewayAuthorizer
+
+  getDrafts:
+    handler: src/handlers/getDrafts.handler
+    events:
+      - http:
+          path: /drafts
+          method: get
+          cors: true
+          authorizer:
+            type: CUSTOM
+            authorizerId:
+              Ref: ApiGatewayAuthorizer
+              
+  getUnreadEmails:
+    handler: src/handlers/getUnreadEmails.handler
+    events:
+      - http:
+          path: /emails/unread
+          method: get
+          cors: true
+          authorizer:
+            type: CUSTOM
+            authorizerId:
+              Ref: ApiGatewayAuthorizer
+
+resources:
+  Resources:
+    EmailsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: claude-mcp-emails-${self:provider.stage}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+          - AttributeName: type
+            AttributeType: S
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: TypeIndex
+            KeySchema:
+              - AttributeName: type
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+              
+    ApiGatewayAuthorizer:
+      Type: AWS::ApiGateway::Authorizer
+      Properties:
+        Name: api-key-authorizer
+        Type: TOKEN
+        IdentitySource: method.request.header.x-api-key
+        RestApiId:
+          Ref: ApiGatewayRestApi
+        AuthorizerUri:
+          Fn::Join:
+            - ''
+            - - 'arn:aws:apigateway:'
+              - Ref: 'AWS::Region'
+              - ':lambda:path/2015-03-31/functions/'
+              - Fn::GetAtt: [AuthorizerLambdaFunction, Arn]
+              - '/invocations'
+
+    AuthorizerLambdaFunction:
+      Type: AWS::Lambda::Function
+      Properties:
+        FunctionName: api-key-authorizer-${self:provider.stage}
+        Handler: src/utils/auth.authorize
+        Runtime: nodejs18.x
+        MemorySize: 128
+        Timeout: 10
+        Role:
+          Fn::GetAtt: [AuthorizerRole, Arn]
+        Code:
+          ZipFile: |
+            exports.authorize = async (event, context) => {
+              const apiKey = event.authorizationToken;
+              const storedKey = process.env.API_KEY;
+              
+              if (apiKey && apiKey === storedKey) {
+                return generatePolicy('user', 'Allow', event.methodArn);
+              } else {
+                return generatePolicy('user', 'Deny', event.methodArn);
+              }
+            };
+            
+            const generatePolicy = (principalId, effect, resource) => {
+              const authResponse = {
+                principalId: principalId
+              };
+              
+              if (effect && resource) {
+                const policyDocument = {
+                  Version: '2012-10-17',
+                  Statement: [{
+                    Action: 'execute-api:Invoke',
+                    Effect: effect,
+                    Resource: resource
+                  }]
+                };
+                authResponse.policyDocument = policyDocument;
+              }
+              
+              return authResponse;
+            };
+        Environment:
+          Variables:
+            API_KEY: ${ssm:/claude-mcp/api-key-${self:provider.stage}}
+
+    AuthorizerRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        Policies:
+          - PolicyName: api-key-authorizer-policy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - ssm:GetParameter
+                  Resource: 
+                    - Fn::Join:
+                      - ':'
+                      - - 'arn:aws:ssm'
+                        - Ref: 'AWS::Region'
+                        - Ref: 'AWS::AccountId'
+                        - 'parameter/claude-mcp/api-key-${self:provider.stage}'
+
+plugins:
+  - serverless-offline
+  - serverless-dotenv-plugin
